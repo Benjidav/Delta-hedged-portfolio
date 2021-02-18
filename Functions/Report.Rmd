@@ -1,0 +1,244 @@
+---
+title: "<center> <h1>Report - Delta hedging project</h1> </center>"
+author: "<center> <h4> Benjamin DAVILA </h4> </center>"
+date: "<center> <h4> 10/12/2020 </h4> </center>"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+rm(list = ls())
+opts_chunk$set(echo=TRUE, 
+               warning=FALSE, 
+               message=FALSE,
+               cache = FALSE,
+               include = TRUE,
+               results = 'show',
+               error = TRUE)
+```
+
+# Summary of the project
+From the data provided (stock history, column B) in the file *Dataset*, we want to create the portfolio history replication of a European call with maturity on **31/12/2018**, strike **K = 6**.
+
+Overview of the data
+
+```{r, echo=FALSE}
+library(numDeriv)
+library(pracma)
+library(ggplot2)
+library("ggpubr")
+
+dataset_heavy = read.csv2("C:\\Users\\benja\\OneDrive\\Documents\\Calibration\\Delta-hedged_portfolio\\Dataset.csv", header = TRUE)
+
+head = head(dataset_heavy, 10)  
+head = head[, -c(5, 6)]
+print(head)
+```
+
+# I. Introduction
+
+Let's assume here that $\sigma_{cte} = 20$%. Let's compute now the vector of maturity thanks to the following formula : $T_i = \frac{(T_{mat} - t_i)}{365}$.
+
+Overview of the vector of maturities
+
+```{r, echo = FALSE}
+maturity.vector = function (date_serie, T)
+{
+  format = "%d/%m/%Y"
+  date = rep(NA, length(date_serie))
+  for (i in 1:length(date_serie))
+  {
+    date[i] = as.numeric(as.Date(T, format) - as.Date(date_serie[i], format))/365
+  }
+  return (date)
+}
+```
+
+
+```{r, echo=FALSE}
+dataset = dataset_heavy[,1:4]
+
+date_serie = dataset[, 1]
+
+stock_price = dataset[, 2]
+
+obs_option_price_6 = dataset[, 3]
+
+obs_option_price_6.5 = dataset[, 4]
+
+# Maturity arbitrarily chosen
+T = "31/12/2018"
+
+T_vector = maturity.vector(date_serie, T)
+
+head(T_vector, 10)
+
+```
+Then, we are going to use the **Black-Scholes formula** to price the corresponding european option call
+Black-Scholes formula : $C(S, t) = S_tN(d_2) - e^{-r(T - t)}KN(d_2)$ with $r = 0$, $\sigma = 20$% and $K = 6$
+
+Overview of the call value over time
+
+```{r, echo=FALSE, fig.align = "center"}
+BS.OptionPricerEU <-function(S, K, T, r,volat, type="Call")
+{
+  d1 <- (log(S/K) + (r + 0.5*volat^2)*T) / (volat*sqrt(T))
+  d2 <- d1 - volat*sqrt(T)
+  if(type=="Call")
+  {
+    value <- S*pnorm(d1) - K*exp(-r*T)*pnorm(d2)
+  }
+  if(type=="Put")
+  {
+    value <- K*exp(-r*T)*pnorm(-d2) - S*pnorm(-d1)
+  }
+  return(value)
+}
+
+Vector.PriceOption = function (stock_price, K, T_vector, r, volat, type = "Call")
+{
+  price_option = rep(NA, length(T_vector))
+  for (i in 1:length(T_vector))
+  {
+    price_option[i] = BS.OptionPricerEU(stock_price[i], K, T_vector[i], 0, volat, "Call")
+  }
+  return (price_option)
+}
+
+#Graphics
+format = "%d/%m/%Y"
+
+date = as.Date(date_serie, format)
+
+#Data taken from the question 1
+option_price_1 = Vector.PriceOption(stock_price, 6, T_vector, 0, 0.2, "Call")
+
+ggplot(data =  as.data.frame(option_price_1),  aes(x = date, y = option_price_1)) + 
+  geom_line(color = "steelblue") +
+  labs(title = "K6 Option value over time",
+       x = "Date",
+       y = "Price") +
+  scale_y_continuous(breaks = seq(0, 1.6, by = 0.2)) +
+  theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold")) +
+  theme(axis.title.x = element_text(hjust = 0.5, size = 12, face = "bold")) +
+  theme(axis.title.y = element_text(hjust = 0.5, size = 12, face = "bold"))
+```
+
+# II. Delta-hedged portfolio with constant volatility
+
+In this part, we are going to build a synthetic delta-hedged portfolio **formed by cash and underlying** associated with the option. The value of the portfolio **must be equal to the value of the option** to be replicated. The iteration process of replication is sum up below. Here, $\delta_t = N\big(d_1(t)\big)$  with $d_1(t) = \frac{1}{\sigma\sqrt{T_t}}\Big[ln\big(\frac{S_t}{K}\big) + \big(r + \frac{1}{2}\sigma^2\big)T_t\Big]$, $S_t$ the value of the stock and $T_t$ the vector of maturities
+
+![](C:\Users\benja\OneDrive\Images\Saved Pictures\delta.png)
+We can deduce the general formula to obtain the value of the portfolio over time : 
+
+$V_t = V_{t - 1} + \delta_{t - 1}(S_t - S_{t - 1})$
+
+Now, let's compute the value of $\delta_t$ over time and give an overview of it 
+
+```{r, echo=FALSE, fig.align="center"}
+
+Vector.d1 = function (S, K, r, volat, T_vector)
+{
+  vector_d1 <- rep(NA, length(T_vector))
+  for (i in 1:length(T_vector))
+  {
+    vector_d1[i] = (log(S[i]/K) + (r + 0.5*volat^2)*T_vector[i]) / (volat*sqrt(T_vector[i]))
+  }
+  return (vector_d1)
+}
+
+Vector.DeltaOption = function (vector_d1)
+{
+  vector_delta <- rep(NA,length(vector_d1))
+  for (i in 1:length(vector_d1))
+  {
+    #delta[i] = N(d1[i])
+    vector_delta[i] = pnorm(vector_d1[i])
+  }
+  return (vector_delta)
+}
+
+d1_vect_1 = Vector.d1(stock_price, 6, 0, 0.2, T_vector)
+
+delta_serie_1 = Vector.DeltaOption(d1_vect_1)
+
+head(delta_serie_1, 10)
+
+
+```
+
+Here we are, we are going to use the previous iteration method mentioned above to build the portfolio history replication of the K6 option
+
+```{r, echo=FALSE, fig.align="center"}
+pf.delta_hedging = function (delta_serie, price_option, stock_price)
+{
+  portfolio = rep(NA, length(delta_serie))
+  #V0 = C0
+  j = 1
+  if (is.na(price_option[1]))
+  {
+    while (is.na(price_option[j]))
+    {
+      j = j + 1
+    }
+    portfolio[j] = price_option[j]
+  }
+  else 
+  {
+    portfolio[1] = price_option[1]
+  }
+  for (i in (j+1):length(portfolio))
+  {
+    portfolio[i] = portfolio[i - 1] + delta_serie[i - 1] * (stock_price[i] - stock_price[i - 1])
+  }
+  return (portfolio)
+}
+
+#Portfolio delta hedged
+pf_DeltaReplication = pf.delta_hedging(delta_serie_1, option_price_1, stock_price) 
+
+delta_hedge_1_graphe <- ggplot(as.data.frame(pf_DeltaReplication), aes(x = date)) + 
+  geom_line(aes(y = pf_DeltaReplication, colour = "red")) + 
+  geom_line(aes(y = option_price_1, colour = "blue")) +
+  scale_color_discrete(name = "", labels = c("Delta-hedged pf", "Option price")) +
+  scale_y_continuous(breaks = seq(0, 1.6, 0.2)) +
+  labs(title = "Delta Hedging of the K6 Option with constant volatility") + 
+  xlab("") + ylab("Value") +
+  theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold")) +
+  theme(axis.title.x = element_text(hjust = 0.5, size = 12, face = "bold")) +
+  theme(axis.title.y = element_text(hjust = 0.5, size = 12, face = "bold")) 
+
+delta_hedge_1_graphe + theme(legend.position = "bottom")
+```
+
+**Interpretation** : As we can see on the chart above, the two times series are almost equal over time. We can deduce that the hedge method is really efficient with a constant volatility.
+
+```{r, echo=FALSE}
+```
+
+
+```{r, echo=FALSE}
+```
+
+
+```{r, echo=FALSE}
+```
+
+
+```{r, echo=FALSE}
+```
+
+
+```{r, echo=FALSE}
+```
+
+
+```{r, echo=FALSE}
+```
+
+
+```{r, echo=FALSE}
+```
+
